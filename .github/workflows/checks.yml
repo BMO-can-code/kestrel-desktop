@@ -1,0 +1,54 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+name: Checks (fast)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup shell tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: bash -n
+        run: |
+          find scripts -name "*.sh" -type f -exec bash -n {} \;
+
+      - name: shellcheck
+        run: |
+          shellcheck scripts/ci/build-macos.sh scripts/ci/test_build_script.sh scripts/check-removed-hostnames.sh scripts/check-injection.sh scripts/check-dead-refs.sh || true
+
+      - name: Fake bundle tests
+        run: |
+          bash scripts/ci/test_build_script.sh
+
+      - name: Hostname gate
+        run: |
+          bash scripts/check-removed-hostnames.sh
+
+      - name: Injection gate
+        run: |
+          bash scripts/check-injection.sh
+
+      - name: Dead refs gate
+        run: |
+          bash scripts/check-dead-refs.sh
+
+      - name: Secret scan (basic)
+        run: |
+          if grep -rn "ghp_\|github_pat_\|AKIA[0-9A-Z]\{16\}\|BEGIN RSA PRIVATE KEY\|BEGIN OPENSSH PRIVATE KEY\|BEGIN EC PRIVATE KEY" . 2>&1 | grep -v ".git"; then
+            echo "Possible secrets found" >&2
+            exit 1
+          fi
+          echo "Secret scan passed"

@@ -1,0 +1,126 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+name: Build macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_mode:
+        description: 'Release mode'
+        required: true
+        default: 'true'
+      disable_lto:
+        description: 'Disable LTO'
+        required: true
+        default: 'true'
+  push:
+    tags:
+      - '*'
+
+env:
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 420
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Probe runner
+        run: |
+          uname -a
+          sw_vers
+          df -h
+          sysctl -n hw.memsize
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /Applications/Xcode*.app /Library/Developer/CoreSimulator 2>&1 | tail -2
+          df -h
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache ~/.mozbuild
+        uses: actions/cache@v4
+        with:
+          path: ~/.mozbuild
+          key: mozbuild-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            mozbuild-${{ runner.os }}-
+
+      - name: Install GNU tar
+        run: brew install gnu-tar 2>&1 | tail -1
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Download Firefox source
+        run: npm run download
+
+      - name: Bootstrap toolchain
+        run: npm run bootstrap -- --application=browser
+
+      - name: Import patches
+        run: npm run import
+
+      - name: Build
+        run: |
+          cd engine
+          export MOZ_SCCACHE=1
+          export RUSTC_WRAPPER=sccache
+          ./mach build
+
+      - name: Package app bundle
+        run: |
+          bash scripts/ci/build-macos.sh
+        env:
+          RELEASE_MODE: ${{ inputs.release_mode || 'true' }}
+          DISABLE_LTO: ${{ inputs.disable_lto || 'true' }}
+          RUNNER_IMAGE: ${{ runner.os }}-${{ runner.arch }}
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: zen-stock-dev-arm64
+          path: zen-stock-dev-arm64.zip
+          retention-days: 14
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-manifest
+          path: artifact-manifest.json
+          retention-days: 14
+
+      - name: Upload build logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: m0-build-logs
+          path: |
+            engine/mozconfig
+            engine/obj-*/config.log
+          if-no-files-found: ignore
+          retention-days: 14
