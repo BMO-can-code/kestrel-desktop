@@ -1,0 +1,194 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+# M0 baseline build. Not a shipping workflow.
+# Produces an unsigned arm64 .app from the current dev tree so that M0
+# benchmarking can run on real hardware without a local toolchain.
+name: M0 Baseline Build (macOS arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_mode:
+        description: "Build with release flags (no PGO) instead of a developer build"
+        type: boolean
+        default: true
+      disable_lto:
+        description: "Disable LTO. Default on because a 14 GB runner cannot link LTO."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m0-baseline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 350
+    env:
+      SURFER_PLATFORM: darwin
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Probe runner
+        run: |
+          sw_vers
+          uname -m
+          sysctl -n hw.ncpu hw.memsize
+          df -h /
+          xcodebuild -version || true
+          xcode-select -p || true
+          ls /Applications | grep -i xcode || true
+          du -sh /Library/Developer/CoreSimulator 2>/dev/null || true
+
+      - name: Free disk space
+        run: |
+          set -x
+          # Keep the selected Xcode; drop every other copy and all simulator
+          # runtimes/platforms that a browser build never touches.
+          SELECTED="$(xcode-select -p | sed 's#/Contents/Developer##')"
+          for app in /Applications/Xcode*.app; do
+            [ "$app" = "$SELECTED" ] && continue
+            sudo rm -rf "$app"
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*
+          sudo rm -rf "$HOME/Library/Developer/CoreSimulator"
+          sudo rm -rf "$HOME/Library/Developer/Xcode/DerivedData"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/iPhoneOS.platform"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/iPhoneSimulator.platform"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/WatchOS.platform"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/WatchSimulator.platform"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/AppleTVOS.platform"
+          sudo rm -rf "$SELECTED/Contents/Developer/Platforms/AppleTVSimulator.platform"
+          df -h /
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Setup Rust
+        run: |
+          rustup show
+          rustc --version
+
+      - name: Install GNU tar
+        run: |
+          # surfer download shells out to GNU tar to unpack the Firefox
+          # source tarball on macOS. The runner image ships BSD tar only.
+          command -v gtar || brew install gnu-tar
+
+      - name: Install npm dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Download Firefox source
+        run: npm run download
+
+      - name: Bootstrap toolchain
+        run: |
+          cd engine
+          ./mach --no-interactive bootstrap --application-choice browser --no-system-changes || true
+
+      - name: Import patches
+        run: |
+          touch engine/.hgignore
+          npm run import
+
+      - name: Build
+        env:
+          ZEN_RELEASE: ${{ inputs.release_mode && '1' || '' }}
+          ZEN_GA_DISABLE_PGO: "1"
+          ZEN_DISABLE_BOOTSTRAP: "1"
+          ZEN_DISABLE_LTO: ${{ inputs.disable_lto && '1' || '' }}
+        run: |
+          set -x
+          df -h /
+          npm run build -- -j 3
+
+      - name: Package app bundle
+        run: |
+          set -ex
+          EXPECTED_BUNDLE_ID="app.zen-browser"
+          EXPECTED_BINARY="zen"
+          cd engine
+          ./mach package
+          MAPFILE="/tmp/app_candidates.txt"
+          rm -f "$MAPFILE"
+          find obj-*/dist -maxdepth 4 -name '*.app' -type d | while read -r cand; do
+            bin="$(basename "$(find "$cand/Contents/MacOS" -maxdepth 1 -type f -perm +111 2>/dev/null | head -1)")"
+            bid="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$cand/Contents/Info.plist" 2>/dev/null || echo "")"
+            echo "$cand|$bin|$bid" >> "$MAPFILE"
+          done
+          MATCHES=$(grep "|${EXPECTED_BINARY}|" "$MAPFILE" | grep "|${EXPECTED_BUNDLE_ID}$" || true)
+          COUNT=$(echo "$MATCHES" | grep -c "^" || echo 0)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 match, got $COUNT" >&2
+            cat "$MAPFILE" >&2
+            exit 1
+          fi
+          APP=$(echo "$MATCHES" | cut -d'|' -f1)
+          test -n "$APP" && test -d "$APP"
+          BIN="$APP/Contents/MacOS/$EXPECTED_BINARY"
+          test -f "$BIN" && test -x "$BIN"
+          echo "APP=$APP"
+          du -sh "$APP"
+          codesign --force --deep --sign - "$APP" || true
+          codesign --verify --deep --strict "$APP" || true
+          plutil -lint "$APP/Contents/Info.plist"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip"
+          ls -lh "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip"
+          unzip -l "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip" | grep "Contents/MacOS/$EXPECTED_BINARY" | head -1
+          TMPD="/tmp/verify_art"
+          rm -rf "$TMPD" && mkdir -p "$TMPD" && cd "$TMPD" && ditto -x -k "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip" . >/dev/null && find . -name '*.app' -path "*$EXPECTED_BINARY*" -not -path "*plugin-container*" | head -1 && ./*/Contents/MacOS/$EXPECTED_BINARY --version 2>&1 | head -1
+          BID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist")
+          VER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          ARCHS=$(lipo -archs "$BIN")
+          SHA256=$(shasum -a 256 "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip" | awk '{print $1}')
+          SIZE=$(stat -f%z "$GITHUB_WORKSPACE/zen-stock-dev-arm64.zip")
+          cat > "$GITHUB_WORKSPACE/artifact-manifest.json" << EOF
+          {"bundle_id":"$BID","version":"$VER","binary":"$EXPECTED_BINARY","archs":"$ARCHS","size_bytes":$SIZE,"sha256":"$SHA256"}
+          EOF
+          cat "$GITHUB_WORKSPACE/artifact-manifest.json"
+
+      - name: Report artifacts
+        run: |
+          df -h /
+          find engine -maxdepth 2 -name 'obj-*' -type d
+          find engine -maxdepth 4 -name '*.app' -type d
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: zen-stock-dev-arm64
+          path: zen-stock-dev-arm64.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m0-build-logs
+          path: |
+            engine/mozconfig
+            engine/obj-*/config.log
+          retention-days: 7
+          if-no-files-found: ignore
