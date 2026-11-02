@@ -81,7 +81,7 @@ jobs:
         run: npm run download
 
       - name: Bootstrap toolchain
-        run: npm run bootstrap -- --application=browser
+        run: ./mach --no-interactive bootstrap --application-choice browser --no-system-changes || true
 
       - name: Import patches
         run: npm run import
