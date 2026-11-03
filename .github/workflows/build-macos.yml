@@ -124,3 +124,8 @@ jobs:
             engine/obj-*/config.log
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Ensure lld not required
+        run: |
+          echo "checking linker"
+          which ld64.lld ld.lld lld 2>&1 | tail -5
