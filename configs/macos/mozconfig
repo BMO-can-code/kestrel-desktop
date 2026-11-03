@@ -1,0 +1,42 @@
+if test "$CROSS_COMPILE"; then
+  ac_add_options --target=aarch64-apple-darwin
+  ac_add_options --host=x86_64-apple-darwin
+  ac_add_options --with-macos-sdk=$ZEN_MAC_CROSS/sdk/MacOSX$MACOS_SDK_VERSION.sdk
+  export CROSS_COMPILE=1
+  export HOST_CC=clang
+  export HOST_CXX=clang++
+  export CC=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-clang
+  export CXX=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-clang++
+  export LLVM_CONFIG=$ZEN_MAC_CROSS/bin/llvm-config
+  export AR=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-ar
+  export NM=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-nm
+  export RANLIB=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-ranlib
+  export READELF=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-readelf
+  export STRIP=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-strip
+  export OBJCOPY=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-objcopy
+  export OBJDUMP=$ZEN_MAC_CROSS/bin/aarch64-apple-darwin-objdump
+  export PKG_CONFIG_LIBDIR=$ZEN_MAC_CROSS/pkgconfig
+  export LIBS="-Wl,-rpath,$ZEN_MAC_CROSS/lib -L$ZEN_MAC_CROSS/lib"
+  export CXXFLAGS="-isystem$ZEN_MAC_CROSS/include/c++/v1"
+  export DMG_TOOL=$ZEN_MAC_CROSS/dmg/dmg
+  export HFS_TOOL=$ZEN_MAC_CROSS/dmg/hfsplus
+
+  if test "$ZEN_RELEASE"; then
+    export MOZ_LD64_KNOWN_GOOD=1
+    ac_add_options --enable-linker=ld64
+  fi
+elif test "$ZEN_RELEASE"; then
+  ALLOWED_SDKS="26.5 26.4 26.3 26.2 26.1 26.0 15.5"
+  for SDK in $ALLOWED_SDKS; do
+    if [ -d "/Library/Developer/CommandLineTools/SDKs/MacOSX${SDK}.sdk" ]; then
+      export MACOS_SDK_DIR="/Library/Developer/CommandLineTools/SDKs/MacOSX${SDK}.sdk"
+      break
+    fi
+  done
+  export MOZ_LD64_KNOWN_GOOD=1
+  ac_add_options --enable-linker=ld64
+else
+  ac_add_options --enable-linker=ld64
+fi
+
+ac_add_options --disable-bootstrap
